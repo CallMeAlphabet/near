@@ -106,7 +106,9 @@ jobs:
 
   release:
     needs: build
-    if: ${{ always() && !cancelled() && needs.build.result != 'cancelled' }}
+    # A cancelled matrix job (e.g. a macOS runner that is unavailable) must not
+    # stop the Linux assets from being published. Only a real build failure does.
+    if: ${{ always() && !cancelled() && needs.build.result != 'failure' }}
     runs-on: ubuntu-latest
 
     steps:
