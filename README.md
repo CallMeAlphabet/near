@@ -2,6 +2,8 @@
 
 near — a LAN-only file transfer hub
 
+No desktop app is required. Open the hub address in any browser on the same network; browser-only instances work on their own.
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)

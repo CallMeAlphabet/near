@@ -3,12 +3,15 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0d1018">
+<meta name="color-scheme" content="dark">
 <title>near</title>
 <style>
 :root{--bg:#0d1018;--raised:#141821;--fg:#f3f3f2;--soft:#a6a6ae;--line:rgba(255,255,255,.1);--accent:#e29db2;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--body:system-ui,-apple-system,"Segoe UI",sans-serif}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 var(--body);padding:24px 18px 64px}
-main{max-width:720px;margin:0 auto}
+html{background:var(--bg)}
+body{margin:0;background:transparent;color:var(--fg);font:15px/1.6 var(--body);padding:24px 18px 64px;min-height:100vh;display:flex;flex-direction:column}
+main{max-width:720px;margin:0 auto;width:100%;flex:1 0 auto;position:relative;z-index:1}
 h1{font-size:2rem;font-weight:400;margin:0 0 4px}
 .head p{margin:0;color:var(--soft)}
 section{margin:30px 0 0}
@@ -34,9 +37,14 @@ li span:last-child{margin-left:auto;white-space:nowrap}
 .bar{height:2px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:14px}
 .bar i{display:block;height:100%;width:0;background:var(--soft)}
 @media(max-width:620px){.row{flex-wrap:wrap;gap:4px 12px}.row .k{min-width:100px}}
+#near-sky{position:fixed;inset:0;width:100vw;height:100vh;display:block;z-index:0;pointer-events:none;image-rendering:pixelated}
+.near-footer{flex:0 0 auto;position:relative;z-index:1;width:100%;max-width:720px;margin:48px auto 0;padding:16px 0 0;border-top:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;align-items:baseline;font:.78rem/1.5 var(--mono);color:var(--soft)}
+.near-footer a{color:var(--accent);text-decoration:none}
+.near-footer a:hover{text-decoration:underline}
 </style>
 </head>
 <body>
+<canvas id="near-sky" aria-hidden="true"></canvas>
 <main>
 <div class="head"><h1>near</h1><p>in-network file transfer.</p></div>
 
@@ -99,6 +107,10 @@ li span:last-child{margin-left:auto;white-space:nowrap}
 <p class="err" id="error" role="alert"></p>
 </section>
 </main>
+<footer class="near-footer">
+<span>near · in-network file transfer</span>
+<a href="https://alphabet.is-a.dev/near">alphabet.is-a.dev/near ↗</a>
+</footer>
 <script>
 const CHUNK = 262144;
 const HIGH = 4194304;
@@ -385,6 +397,353 @@ el("save").onclick = () => {
 };
 renderList(); renderProgress(); renderRoute(); renderIncoming();
 connect();
+</script>
+<script>
+/* near's self-hosted page uses the same pixel sky as alphabet.is-a.dev.
+   Vanilla port of components/pixel-sky.tsx: same palette, weather table,
+   star field, cloud sprites, birds and page-relative precipitation. */
+(function () {
+  const P = 3;
+  const cv = document.getElementById("near-sky");
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  if (!ctx) return;
+  ctx.imageSmoothingEnabled = false;
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  const PAL = {
+    sky0: [9, 13, 27], sky1: [15, 23, 45], sky2: [27, 32, 60],
+    star: [255, 255, 255], rain: [126, 170, 234], rainFar: [94, 126, 184],
+    snow: [238, 245, 255], snowShade: [148, 168, 206], streak: [201, 212, 240],
+    storm: [55, 62, 84], aurora2: [64, 190, 196], aurora3: [156, 232, 122],
+    aurora4: [150, 124, 226], ripple: [150, 186, 232]
+  };
+  const rgb = k => "rgb(" + PAL[k].join(",") + ")";
+  const TONES = ["rgb(178,190,220)", "rgb(146,160,196)", "rgb(114,130,168)",
+                 "rgb(86,100,136)", "rgb(62,74,106)"];
+  const WEATHER = {
+    fair:  { cover: 0.55, wind: 3,  rain: 0,   snow: 0, storm: 0,    streaks: 0.04, aurora: 0.132 },
+    clear: { cover: 0.18, wind: 2,  rain: 0,   snow: 0, storm: 0,    streaks: 0,    aurora: 1.1 },
+    wind:  { cover: 0.7,  wind: 18, rain: 0,   snow: 0, storm: 0.08, streaks: 1.5,  aurora: 0.11 },
+    rain:  { cover: 0.95, wind: 6,  rain: 1,   snow: 0, storm: 0.4,  streaks: 0,    aurora: 0 },
+    storm: { cover: 1,    wind: 12, rain: 1.6, snow: 0, storm: 1,    streaks: 0.35, aurora: 0 },
+    snow:  { cover: 0.9,  wind: 3,  rain: 0,   snow: 1, storm: 0.2,  streaks: 0,    aurora: 0.55 }
+  };
+  const MODES = ["fair", "clear", "wind", "rain", "storm", "snow"];
+  const p = Object.assign({}, WEATHER.fair);
+  let mode = "fair", modeT = 0, modeIndex = 0;
+
+  let w = 1, h = 1, pageH = 1, groundStop = 1, pageOff = 0;
+  let frame = 0, last = 0, elapsed = 0, flash = 0, gust = 0;
+  let drops = [], flakes = [], birds = [], specks = [], clouds = [];
+  let flockSeq = 0, precipSeeded = false;
+
+  const noise = (x, y) => { const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return n - Math.floor(n); };
+  const seededRandom = seed => () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const cloudHash = (a, b) => noise(a * 0.71, b * 1.37);
+
+  function cloudSprite(cw, ch, seed) {
+    const c = document.createElement("canvas");
+    c.width = cw; c.height = ch;
+    const g = c.getContext("2d");
+    if (!g) return c;
+    const base = ch - 2;
+    const puffs = [];
+    const count = Math.max(3, Math.round(cw / 10));
+    for (let i = 0; i < count; i++) {
+      const u = count === 1 ? 0.5 : i / (count - 1);
+      const mid = 1 - Math.abs(u - 0.5) * 1.3;
+      const r = ch * (0.34 + noise(seed + 7, i) * 0.18) * (0.62 + 0.38 * mid);
+      const cx = cw * (0.16 + u * 0.68) + (noise(seed + i, 3) - 0.5) * 3;
+      const cy = Math.max(r + 1, base - r * (0.72 + noise(i, seed) * 0.42) - mid * ch * 0.1);
+      puffs.push([cx, cy, r]);
+    }
+    const ex = cw / 2, ey = base - ch * 0.16, erx = cw / 2 - 1.5, ery = ch * 0.27;
+    const inside = (x, y) => {
+      if (x < 0 || y < 0 || x >= cw || y > base) return false;
+      const px = x + 0.5, py = y + 0.5;
+      if (((px - ex) / erx) ** 2 + ((py - ey) / ery) ** 2 <= 1) return true;
+      for (const [cx, cy, r] of puffs) if ((px - cx) ** 2 + (py - cy) ** 2 <= r * r) return true;
+      return false;
+    };
+    let top = ch;
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) if (inside(x, y)) { top = Math.min(top, y); break; }
+    for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+      if (!inside(x, y)) continue;
+      let up = 0;
+      while (up < 6 && inside(x, y - up - 1)) up++;
+      let v = Math.min(1, (y - top) / Math.max(1, base - top)) * 0.78;
+      if (up <= 1) v -= 0.42; else if (up <= 2) v -= 0.2;
+      if (!inside(x + 1, y) || !inside(x + 2, y - 1)) v += 0.14;
+      if (!inside(x - 1, y)) v -= 0.08;
+      const q = v + (noise(x + seed, y + seed) - 0.5) * 0.2;
+      let tone = q < 0.12 ? 0 : q < 0.4 ? 1 : q < 0.63 ? 2 : q < 0.84 ? 3 : 4;
+      if (!inside(x, y + 1) && y > top + (base - top) * 0.45) tone = 4;
+      if (noise(x * 3 + seed, y * 3) > 0.88) tone = Math.max(0, tone - 1);
+      g.fillStyle = TONES[tone];
+      g.fillRect(x, y, 1, 1);
+    }
+    g.globalAlpha = 0.32;
+    g.fillStyle = TONES[1];
+    for (let x = 0; x < cw; x++) if (noise(x * 5 + seed, 91) > 0.93) g.fillRect(x, Math.max(0, top - 1), 1, 1);
+    g.globalAlpha = 1;
+    return c;
+  }
+
+  // Seeded stars with a minimum separation, clouds spread over the whole band.
+  const starRand = seededRandom(20261105);
+  for (let i = 0; i < 180; i++) {
+    let x = 0, y = 0;
+    for (let attempt = 0; attempt < 16; attempt++) {
+      x = starRand(); y = starRand();
+      if (specks.every(o => { const dx = (o.x - x) * 1.35, dy = o.y - y; return dx * dx + dy * dy > 0.000676; })) break;
+    }
+    specks.push({ x, y, phase: starRand() * 6, speed: 0.6 + starRand() * 0.8,
+                  bright: starRand() < 0.14, tint: starRand() < 0.14 ? 1 : starRand() > 0.88 ? 2 : 0 });
+  }
+  for (let i = 0; i < 9; i++) {
+    const cw = 38 + (i % 4) * 11, ch = 16 + (i % 3) * 4;
+    clouds.push({ x: (i * 0.61803398875) % 1, y: 0.05 + ((i * 0.61803398875 + 0.27) % 1) * 0.84,
+                  w: cw, h: ch, speed: 0.00009 + (i % 4) * 0.00004, layer: i % 3,
+                  bob: i * 1.31, seed: 11 + i * 7, sprite: cloudSprite(cw, ch, 11 + i * 7) });
+  }
+
+  function measure() {
+    pageH = Math.max(h, Math.ceil(Math.max(document.documentElement.scrollHeight, document.body.scrollHeight, window.innerHeight) / P));
+    groundStop = Math.max(h * 0.7, pageH - 10);
+  }
+  function resize() {
+    w = Math.max(40, Math.ceil(window.innerWidth / P));
+    h = Math.max(40, Math.ceil(window.innerHeight / P));
+    cv.width = w; cv.height = h;
+    cv.style.width = (w * P) + "px"; cv.style.height = (h * P) + "px";
+    ctx.imageSmoothingEnabled = false;
+    measure();
+  }
+  resize();
+  window.addEventListener("resize", resize);
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(measure).observe(document.body);
+
+  const px = (x, y, cw, ch, color, a = 1) => {
+    ctx.globalAlpha = a; ctx.fillStyle = color;
+    ctx.fillRect(Math.round(x), Math.round(y), Math.max(1, Math.round(cw)), Math.max(1, Math.round(ch)));
+    ctx.globalAlpha = 1;
+  };
+  const blend = (a, b, k) => "rgb(" + Math.round(a[0] + (b[0] - a[0]) * k) + "," +
+                            Math.round(a[1] + (b[1] - a[1]) * k) + "," +
+                            Math.round(a[2] + (b[2] - a[2]) * k) + ")";
+  const drawBird = (x, y, flap, a) => {
+    const light = "rgb(198,214,238)", mid = "rgb(132,156,192)", dark = "rgb(70,88,122)";
+    const wings = [
+      [[-3,-2],[-2,-1],[-1,-1],[3,-2],[2,-1],[1,-1]],
+      [[-3,-1],[-2,-1],[-1,0],[3,-1],[2,-1],[1,0]],
+      [[-3,1],[-2,0],[-1,0],[3,1],[2,0],[1,0]],
+      [[-3,-1],[-2,-1],[-1,0],[3,-1],[2,-1],[1,0]]
+    ];
+    for (const [dx, dy] of wings[flap]) {
+      px(x + dx, y + dy, 1, 1, dx < 0 ? mid : light, a);
+      if (flap === 1 || flap === 2) px(x + dx, y + dy + 1, 1, 1, dark, a * 0.4);
+    }
+    px(x - 1, y, 3, 1, dark, a);
+    px(x - 1, y - 1, 3, 1, mid, a * 0.85);
+    px(x + 2, y - 1, 1, 1, light, a);
+    px(x + 3, y - 1, 1, 1, "rgb(232,190,116)", a * 0.8);
+    px(x - 3, y + 1, 2, 1, dark, a * 0.7);
+  };
+  const liveFlocks = () => new Set(birds.map(b => b.flock));
+  function spawnFlock(y) {
+    const live = liveFlocks();
+    if (live.size >= 2) {
+      const oldest = Math.min.apply(null, [...live]);
+      birds = birds.filter(b => b.flock !== oldest);
+    }
+    const id = ++flockSeq, count = 4 + Math.floor(Math.random() * 6);
+    for (let i = 0; i < count; i++)
+      birds.push({ x: -14 - (i % 5) * 14 - Math.floor(i / 5) * 10,
+                   y: y + (i % 2 ? 5 : -5) + Math.floor(i / 5) * 9 + Math.floor(i / 2) * 2,
+                   vx: 1.1 + i * 0.035, vy: -0.02, life: 1200, phase: i * 1.6, flock: id });
+  }
+  const reach = () => w * 0.34 + 8;
+  const wrapX = x => {
+    const span = w + 16 + reach();
+    if (x > w + 8) return x - span;
+    if (x < -reach() - 8) return x + span;
+    return x;
+  };
+  function spawnDrop(x, y, seeded) {
+    const d = Math.random() < 0.45 ? 0.75 : 0.35;
+    const vy = (150 + Math.random() * 90) * (0.55 + d * 0.7);
+    drops.push({ x, y, vx: vy * (0.1 + p.wind * 0.004 + Math.random() * 0.03), vy,
+                 len: d > 0.5 ? 6 + Math.random() * 4 : 3 + Math.random() * 2,
+                 depth: d, stop: groundStop + Math.random() * 12 });
+  }
+  function spawnFlake(x, y) {
+    const d = 0.25 + Math.random() * 0.65;
+    flakes.push({ x, y, vy: 22 + Math.random() * 26, size: d > 0.86 ? 3 : d > 0.5 ? 2 : 1,
+                  depth: d, phase: Math.random() * 6, spin: Math.random() * 4 });
+  }
+
+  function draw(now) {
+    const dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016;
+    last = now; elapsed += dt; frame++;
+    pageOff = (window.scrollY || 0) / P;
+    measure();
+
+    modeT += dt;
+    if (modeT > 120) { modeT = 0; modeIndex = (modeIndex + 1) % MODES.length; }
+    mode = MODES[modeIndex];
+    const target = WEATHER[mode], ease = 1 - Math.exp(-dt / 3.4);
+    for (const k of Object.keys(p)) p[k] += (target[k] - p[k]) * ease;
+    gust = Math.max(0, gust - dt * 0.6);
+    for (const c of clouds) c.x = (c.x + c.speed * 30 * dt * (1 + p.wind * 0.012)) % 1.3;
+
+    const wet = Math.min(1, p.rain * 0.55 + p.storm * 0.6);
+    const grad = ctx.createLinearGradient(0, 0, 0, h);
+    grad.addColorStop(0, blend(PAL.sky0, [26, 27, 31], wet));
+    grad.addColorStop(0.55, blend(PAL.sky1, [37, 38, 42], wet));
+    grad.addColorStop(1, blend(PAL.sky2, [50, 50, 54], wet));
+    ctx.fillStyle = grad; ctx.fillRect(0, 0, w, h);
+    if (p.storm > 0.02) px(0, 0, w, h, rgb("storm"), p.storm * 0.12);
+
+    // Stars: seeded, page-relative bands across the whole document.
+    ctx.save(); ctx.translate(0, -pageOff);
+    const bandH = Math.max(1, h);
+    const veil = Math.min(1, pageOff / (h * 0.34));
+    for (let band = Math.floor((pageOff - 2) / bandH); band <= Math.ceil((pageOff + h + 2) / bandH); band++) {
+      const drift = ((band * 0.213) % 1 + 1) % 1;
+      for (const s of specks) {
+        const sy = Math.round(s.y * bandH + band * bandH);
+        if (sy < 0 || sy >= groundStop) continue;
+        const vy = sy - pageOff;
+        if (vy < -2 || vy > h + 2) continue;
+        const sx = Math.round(((s.x + drift) % 1) * w);
+        const twinkle = 0.5 + 0.5 * Math.sin(frame * 0.035 * s.speed + s.phase);
+        const color = s.tint === 1 ? "rgb(214,228,255)" : s.tint === 2 ? "rgb(255,236,192)" : rgb("star");
+        const fade = 1 - veil * (1 - Math.pow(Math.min(1, Math.max(0, vy / (h * 0.7))), 2));
+        const a = (0.12 + 0.23 * twinkle) * (1 - p.cover * 0.3) * fade;
+        px(sx, sy, 1, 1, color, a);
+        if (s.bright && twinkle > 0.58) {
+          const grow = (twinkle - 0.58) / 0.42, arm = grow > 0.55 ? 2 : 1;
+          px(sx - arm, sy, arm * 2 + 1, 1, color, a * 0.5 * grow);
+          px(sx, sy - arm, 1, arm * 2 + 1, color, a * 0.5 * grow);
+        }
+      }
+    }
+    ctx.restore();
+
+    // Moon: pinned to the viewport.
+    if (window.innerWidth > 620 && p.cover < 0.98) {
+      const mx = w * 0.78, my = h * 0.19, r = 10;
+      ctx.save(); ctx.globalAlpha = 0.85 * (1 - p.cover * 0.4);
+      ctx.fillStyle = "rgb(240,234,219)";
+      ctx.beginPath(); ctx.arc(mx, my, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "rgb(205,204,196)";
+      ctx.beginPath(); ctx.arc(mx - 3, my - 3, 2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(mx + 4, my + 2, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+
+    // Aurora: viewport-pinned ribbons.
+    if (p.aurora > 0.01) {
+      const ribbons = [
+        { tone: rgb("aurora4"), lift: -h * 0.025, depth: h * 0.155, alpha: 0.1, phase: 0 },
+        { tone: rgb("aurora2"), lift: -h * 0.005, depth: h * 0.13, alpha: 0.16, phase: 1.8 },
+        { tone: rgb("aurora3"), lift: h * 0.015, depth: h * 0.12, alpha: 0.37, phase: 3.5 }
+      ];
+      for (let band = 0; band < ribbons.length; band++) {
+        const r = ribbons[band], drift = frame * (0.004 + band * 0.0016);
+        for (let x = 0; x < w; x += 2) {
+          const wave = Math.sin(x * 0.014 + drift + r.phase) * h * 0.026 + Math.sin(x * 0.037 - drift * 1.4 + r.phase) * h * 0.011;
+          const top = r.lift + wave, fall = r.depth * (0.82 + 0.18 * Math.sin(x * 0.019 + drift * 1.7 + band));
+          const glow = 0.86 + 0.14 * Math.sin(x * 0.021 + drift * 0.7 + band);
+          const windowFade = 0.55 + 0.45 * Math.sin(Math.PI * x / w);
+          for (let y = 0; y < fall; y += 3) {
+            const a = p.aurora * r.alpha * Math.pow(1 - y / fall, 0.85) * glow * windowFade;
+            if (a > 0.012) px(x, top + y, 2, 3, r.tone, a);
+          }
+        }
+      }
+    }
+
+    // Clouds: page-relative, per-band spread (no stripes).
+    ctx.save(); ctx.translate(0, -pageOff);
+    for (let band = Math.floor((pageOff - 48) / bandH); band <= Math.ceil((pageOff + h + 48) / bandH); band++) {
+      for (const c of clouds) {
+        const cx = Math.round(((c.x + cloudHash(c.seed, band) * 0.9) % 1.14 - 0.07) * w - c.w / 2);
+        const cy = Math.round(c.y * h + Math.sin(frame * 0.009 + c.bob) * 0.55
+                              + band * bandH + (cloudHash(c.seed + 41, band) - 0.5) * h * 0.2);
+        if (cy + c.h >= groundStop || cy - pageOff > h || cy + c.h - pageOff < 0) continue;
+        const base = Math.min(0.5, p.cover * (0.26 + c.layer * 0.09));
+        const topFade = Math.min(1, Math.max(0, (cy - pageOff + c.h) / (h * 0.4)));
+        const a = base * (1 - veil * (1 - topFade));
+        if (a < 0.02 || !c.sprite) continue;
+        ctx.globalAlpha = Math.min(0.9, a);
+        ctx.drawImage(c.sprite, cx, cy);
+        ctx.globalAlpha = 1;
+      }
+    }
+    ctx.restore();
+
+    // Precipitation enters at the top of the document; wrapping keeps the
+    // left side covered all the way down long pages.
+    if (!reduce) {
+      if (!precipSeeded && (p.rain > 0.1 || p.snow > 0.1)) {
+        precipSeeded = true;
+        const n = Math.min(900, Math.round(p.rain * groundStop * 0.9));
+        for (let i = 0; i < n; i++) spawnDrop(Math.random() * (w + 8 + reach()) - reach(), Math.random() * Math.max(1, groundStop - 4));
+        const m = Math.min(900, Math.round(p.snow * groundStop * 1.6));
+        for (let i = 0; i < m; i++) spawnFlake(Math.random() * (w + 12 + w * 0.2) - 6 - w * 0.2, Math.random() * Math.max(1, groundStop - 4));
+      }
+      for (let k = p.rain * 310 * dt + Math.random(); k > 1; k--)
+        spawnDrop(Math.random() * (w + 8 + reach()) - reach(), -2 - Math.random() * 14);
+      for (let k = p.snow * 100 * dt + Math.random(); k > 1; k--)
+        spawnFlake(Math.random() * (w + 12 + w * 0.2) - 6 - w * 0.2, -2 - Math.random() * 10);
+      if (!birds.length) {
+        spawnFlock(groundStop * 0.2 + Math.random() * 12);
+        spawnFlock(groundStop * 0.56 + Math.random() * 12);
+      } else if (frame % 690 === 0) {
+        spawnFlock(Math.random() * Math.max(1, groundStop - 12));
+      }
+    }
+    ctx.save(); ctx.translate(0, -pageOff);
+    for (let i = drops.length - 1; i >= 0; i--) {
+      const d = drops[i];
+      d.x = wrapX(d.x + d.vx * dt); d.y += d.vy * dt;
+      if (d.y >= d.stop || d.y > pageH + 8) { drops.splice(i, 1); continue; }
+      if (d.y - pageOff < -d.len - 2 || d.y - pageOff > h + 2) continue;
+      const color = d.depth > 0.5 ? rgb("rain") : rgb("rainFar");
+      const a = d.depth > 0.5 ? 0.75 : 0.42, slant = d.vx / d.vy;
+      for (let j = 0; j < d.len; j++) px(d.x - slant * j, d.y - j, 1, 1, color, a * (1 - j / (d.len * 1.35)));
+    }
+    for (let i = flakes.length - 1; i >= 0; i--) {
+      const f = flakes[i];
+      f.y += f.vy * dt * (0.55 + f.depth);
+      f.x = wrapX(f.x + Math.max(0.3, p.wind * (0.25 + f.depth * 0.4) + Math.sin(elapsed * 1.3 + f.phase) * 1.2) * dt);
+      if (f.y >= groundStop) { flakes.splice(i, 1); continue; }
+      if (f.y - pageOff < -2 || f.y - pageOff > h + 2) continue;
+      const a = 0.55 + f.depth * 0.45;
+      if (f.size === 3) { px(f.x - 2, f.y, 5, 1, rgb("snow"), a); px(f.x, f.y - 2, 1, 5, rgb("snow"), a); }
+      else if (f.size === 2) { px(f.x - 1, f.y, 3, 1, rgb("snow"), a); px(f.x, f.y - 1, 1, 3, rgb("snow"), a); }
+      else px(f.x, f.y, 1, 1, rgb("snow"), a);
+    }
+    for (let i = birds.length - 1; i >= 0; i--) {
+      const q = birds[i];
+      q.x += q.vx; q.y += q.vy; q.life -= 1;
+      if (q.life <= 0 || q.y > pageH + 6 || q.x > w + 8 || q.y > groundStop) { birds.splice(i, 1); continue; }
+      if (q.y - pageOff < -8 || q.y - pageOff > h + 8) continue;
+      const flap = Math.floor(frame * 0.13 + q.phase) % 4;
+      drawBird(q.x, q.y + Math.sin(frame * 0.045 + q.phase) * 0.6, flap, 0.62 * Math.min(1, q.life / 24));
+    }
+    ctx.restore();
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
 </script>
 </body>
 </html>
