@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>near</title>
+<style>
+:root{--bg:#0d1018;--raised:#141821;--fg:#f3f3f2;--soft:#a6a6ae;--line:rgba(255,255,255,.1);--accent:#e29db2;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;--body:system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.6 var(--body);padding:24px 18px 64px}
+main{max-width:720px;margin:0 auto}
+h1{font-size:2rem;font-weight:400;margin:0 0 4px}
+.head p{margin:0;color:var(--soft)}
+section{margin:30px 0 0}
+h2{font:700 .78rem/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--soft);margin:0 0 10px}
+h2::before{content:"› ";color:var(--accent)}
+.row{display:flex;gap:16px;align-items:baseline;padding:9px 2px;border-bottom:1px solid var(--line);font:.82rem/1.5 var(--mono)}
+.row .k{color:var(--soft);min-width:130px}
+.row .v{flex:1;overflow-wrap:anywhere}
+.box{border:1px solid rgba(255,255,255,.2);border-radius:12px;background:var(--raised);padding:18px 20px;margin-top:14px}
+label{display:block;font:700 .78rem/1.4 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--soft);margin:0 0 9px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+input[type=text]{min-width:220px;flex:1;background:transparent;border:1px solid var(--line);border-radius:6px;padding:8px 10px;color:var(--fg);font:.85rem var(--mono)}
+button{background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:6px;padding:8px 14px;font:.85rem var(--mono);cursor:pointer}
+button:hover{background:rgba(226,157,178,.1)}
+button:disabled{opacity:.4;cursor:default}
+button.small{border-color:var(--line);color:var(--soft);padding:6px 10px;font-size:.78rem}
+.note{margin:14px 0 0;color:var(--soft);font-size:.84rem}
+.err{margin:14px 0 0;font-size:.86rem}
+ul{list-style:none;margin:14px 0 0;padding:0;font:.8rem var(--mono)}
+li{display:flex;gap:12px;padding:7px 0;border-bottom:1px solid var(--line);color:var(--soft)}
+li::before{content:"›";color:var(--soft)}
+li span:last-child{margin-left:auto;white-space:nowrap}
+.bar{height:2px;background:var(--line);border-radius:999px;overflow:hidden;margin-top:14px}
+.bar i{display:block;height:100%;width:0;background:var(--soft)}
+@media(max-width:620px){.row{flex-wrap:wrap;gap:4px 12px}.row .k{min-width:100px}}
+</style>
+</head>
+<body>
+<main>
+<div class="head"><h1>near</h1><p>in-network file transfer.</p></div>
+
+<section>
+<h2>hub</h2>
+<div>
+<div class="row"><span class="k">state</span><span class="v" id="state">connecting</span></div>
+<div class="row"><span class="k">ice servers</span><span class="v">none</span></div>
+<div class="row"><span class="k">status</span><span class="v" id="status">idle</span></div>
+</div>
+<div class="box">
+<label for="hub">hub address</label>
+<div class="actions">
+<input id="hub" type="text" spellcheck="false" placeholder="https://...">
+<button id="connect">connect</button>
+<button class="small" id="disconnect">disconnect</button>
+</div>
+<p class="note" id="hubnote">open near from this address on both devices.</p>
+</div>
+</section>
+
+<section>
+<h2>devices</h2>
+<div id="peers"></div>
+<p class="note" id="peersnote">waiting for other devices.</p>
+</section>
+
+<section>
+<h2>files</h2>
+<div class="box">
+<label for="files">choose files</label>
+<div class="actions">
+<input id="files" type="file" multiple>
+<button class="small" id="clear">clear</button>
+</div>
+<div style="margin-top:16px">
+<label for="text">paste a link or text</label>
+<div class="actions">
+<input id="text" type="text" spellcheck="false" placeholder="paste here">
+<button id="add">add</button>
+</div>
+</div>
+<ul id="list" aria-live="polite"></ul>
+<p class="note" id="listnote">nothing selected yet.</p>
+</div>
+</section>
+
+<section>
+<h2>transfer</h2>
+<div>
+<div class="row"><span class="k">route</span><span class="v" id="route">no channel open</span></div>
+<div class="row"><span class="k">acknowledged</span><span class="v" id="bytes">0 B</span></div>
+</div>
+<div class="bar" aria-hidden="true"><i id="bar"></i></div>
+<div class="actions" style="margin-top:14px">
+<button id="send">send</button>
+<button class="small" id="save" hidden>save</button>
+</div>
+<p class="note" id="receive"></p>
+<p class="err" id="error" role="alert"></p>
+</section>
+</main>
+<script>
+const CHUNK = 262144;
+const HIGH = 4194304;
+const el = id => document.getElementById(id);
+let id = localStorage.getItem("near-id");
+if (!id) { id = crypto.randomUUID(); localStorage.setItem("near-id", id); }
+const name = "device-" + id.slice(0, 6);
+let hub = localStorage.getItem("near-hub") || location.origin;
+el("hub").value = hub;
+let since = 0, running = false;
+const sessions = new Map();
+let files = [], texts = [], progress = { sent: 0, total: 0 }, incoming = null;
+
+function fmt(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KiB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MiB";
+  return (n / 1073741824).toFixed(1) + " GiB";
+}
+function isLan(host) {
+  const name = host.replace(/^\[|\]$/g, "").toLowerCase();
+  if (name === "localhost" || name === "::1" || name.endsWith(".local")) return true;
+  if (name.startsWith("fc") || name.startsWith("fd") || name.startsWith("fe80:")) return true;
+  const parts = name.split(".");
+  if (parts.length !== 4 || !parts.every(p => /^\d{1,3}$/.test(p) && Number(p) <= 255)) return false;
+  const a = Number(parts[0]), b = Number(parts[1]);
+  return a === 10 || a === 127 || (a === 192 && b === 168)
+    || (a === 172 && b >= 16 && b <= 31) || (a === 169 && b === 254);
+}
+function log(text) { el("status").textContent = text; }
+function error(text) { el("error").textContent = text; }
+async function api(path, body) {
+  const opts = body ? { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {};
+  const response = await fetch(hub + path, opts);
+  if (!response.ok) throw new Error(path + " returned " + response.status);
+  return response.json();
+}
+async function sha256(data) {
+  const input = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  const hash = await crypto.subtle.digest("SHA-256", input);
+  return [...new Uint8Array(hash)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function signal(to, type, payload) {
+  return api("/api/signal", { room: "near", from: id, to, type, payload });
+}
+function renderPeers(list) {
+  const other = list.filter(p => p.id !== id);
+  el("peers").innerHTML = "";
+  for (const peer of other) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const k = document.createElement("span");
+    k.className = "k"; k.textContent = peer.name;
+    const v = document.createElement("span");
+    v.className = "v"; v.textContent = peer.id.slice(0, 8);
+    const b = document.createElement("button");
+    b.className = "small"; b.textContent = "pair";
+    b.onclick = () => pair(peer.id);
+    row.append(k, v, b);
+    el("peers").append(row);
+  }
+  el("peersnote").textContent = other.length ? "" : "no other device has opened near on this hub yet.";
+}
+function renderList() {
+  const items = files.map(f => [f.name, fmt(f.size)]).concat(texts.map(t => [t, "text"]));
+  el("list").innerHTML = "";
+  for (const [a, b] of items) {
+    const li = document.createElement("li");
+    const x = document.createElement("span"); x.textContent = a;
+    const y = document.createElement("span"); y.textContent = b;
+    li.append(x, y); el("list").append(li);
+  }
+  el("listnote").textContent = items.length ? "" : "nothing selected yet.";
+}
+function renderProgress() {
+  const pct = progress.total ? Math.round(progress.sent / progress.total * 100) : 0;
+  el("bar").style.width = pct + "%";
+  el("bytes").textContent = fmt(progress.sent) + (progress.total ? " of " + fmt(progress.total) : "");
+}
+function renderRoute() {
+  const open = [...sessions.values()].filter(s => s.dc && s.dc.readyState === "open").length;
+  el("route").textContent = open ? "direct lan channel open" : "no channel open";
+  return open;
+}
+function renderIncoming() {
+  const b = el("save");
+  if (!incoming) { b.hidden = true; el("receive").textContent = ""; return; }
+  b.hidden = false;
+  b.textContent = "save " + incoming.name;
+  el("receive").textContent = (incoming.ok ? "integrity verified" : "integrity check failed, do not keep this file") + ": " + fmt(incoming.size);
+}
+function makeSession(target) {
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  const s = { pc, target, dc: null, rx: null, handle: null, tx: {}, resumeWaiter: null };
+  pc.onicecandidate = e => { if (e.candidate) signal(target, "ice", e.candidate.toJSON()).catch(() => {}); };
+  pc.ondatachannel = e => { s.dc = e.channel; attach(s); };
+  s.handle = async m => {
+    if (m.type === "offer") {
+      await pc.setRemoteDescription(m.payload);
+      await pc.setLocalDescription(await pc.createAnswer());
+      await signal(m.from, "answer", pc.localDescription.toJSON());
+    } else if (m.type === "answer") {
+      await pc.setRemoteDescription(m.payload);
+    } else if (m.type === "ice") {
+      await pc.addIceCandidate(m.payload);
+    }
+  };
+  return s;
+}
+function attach(s) {
+  const dc = s.dc;
+  dc.binaryType = "arraybuffer";
+  if (!s.rx) s.rx = { chunks: [], digests: [], index: 0, meta: null };
+  dc.onopen = () => { log("direct lan channel open"); renderRoute(); };
+  dc.onmessage = async e => {
+    if (typeof e.data === "string") { await control(s, JSON.parse(e.data)); return; }
+    const i = s.rx.index++;
+    s.rx.chunks[i] = e.data;
+    s.rx.digests[i] = await sha256(e.data);
+    if (s.rx.meta) dc.send(JSON.stringify({ kind: "ack", transferId: s.rx.meta.transferId, index: i }));
+  };
+}
+function waitResume(s) {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = value => {
+      if (done) return;
+      done = true; clearTimeout(timer); s.resumeWaiter = null; resolve(value);
+    };
+    s.resumeWaiter = finish;
+    const timer = setTimeout(() => finish(null), 250);
+  });
+}
+async function control(s, m) {
+  if (m.kind === "meta") {
+    if (!s.rx || s.rx.meta?.transferId !== m.meta.transferId) {
+      s.rx = { chunks: [], digests: [], index: 0, meta: m.meta };
+    }
+    s.rx.meta = m.meta;
+    if (s.rx.index > 0) {
+      s.dc.send(JSON.stringify({ kind: "resume", transferId: m.meta.transferId, nextIndex: s.rx.index }));
+    }
+    log("receiving " + m.meta.name);
+  } else if (m.kind === "resume") {
+    if (s.resumeWaiter) s.resumeWaiter(m.nextIndex);
+  } else if (m.kind === "ack") {
+    const sent = Math.min((m.index + 1) * CHUNK, progress.total);
+    if (sent > progress.sent) { progress.sent = sent; renderProgress(); }
+  } else if (m.kind === "done" && s.rx && s.rx.meta) {
+    const ok = await sha256(s.rx.digests.join("")) === m.digest;
+    incoming = { name: s.rx.meta.name, size: s.rx.meta.size, ok, blob: new Blob(s.rx.chunks.filter(Boolean)) };
+    log(ok ? "received " + s.rx.meta.name : "integrity check failed");
+    renderIncoming();
+    s.rx = { chunks: [], digests: [], index: 0, meta: null };
+  }
+}
+function freshSession(peer) {
+  const old = sessions.get(peer);
+  const s = makeSession(peer);
+  if (old) { s.tx = old.tx; s.rx = old.rx; }
+  sessions.set(peer, s);
+  return s;
+}
+async function pair(peer) {
+  const existing = sessions.get(peer);
+  if (existing && existing.dc && existing.dc.readyState === "open") { log("already paired"); return; }
+  const s = freshSession(peer);
+  s.dc = s.pc.createDataChannel("near", { ordered: true });
+  attach(s);
+  await s.pc.setLocalDescription(await s.pc.createOffer());
+  await signal(peer, "offer", s.pc.localDescription.toJSON());
+  log("offer sent, waiting for an answer");
+}
+async function handle(m) {
+  if (m.to && m.to !== id) return;
+  if (m.from === id) return;
+  if (m.type === "hello") {
+    renderPeers((await api("/api/state?room=near")).peers);
+    return;
+  }
+  if (m.type === "offer" || m.type === "answer" || m.type === "ice") {
+    let s = sessions.get(m.from);
+    const stale = s && (s.pc.connectionState === "closed" || s.pc.connectionState === "failed");
+    if (!s || (m.type === "offer" && stale)) s = freshSession(m.from);
+    try { await s.handle(m); } catch (e) { error("pairing failed: " + e.message); }
+  }
+}
+async function pollLoop() {
+  while (running) {
+    try {
+      const r = await api("/api/poll?room=near&id=" + encodeURIComponent(id) + "&since=" + since + "&timeout=20000");
+      for (const m of r.messages) { since = Math.max(since, m.seq); await handle(m); }
+    } catch {
+      if (!running) break;
+      await new Promise(resolve => setTimeout(resolve, 1200));
+    }
+  }
+}
+function drain(dc) {
+  return new Promise(resolve => {
+    let timer = null;
+    dc.bufferedAmountLowThreshold = CHUNK * 4;
+    const done = () => { dc.removeEventListener("bufferedamountlow", done); if (timer !== null) clearInterval(timer); resolve(); };
+    dc.addEventListener("bufferedamountlow", done);
+    timer = setInterval(() => { if (dc.bufferedAmount <= CHUNK * 4 || dc.readyState !== "open") done(); }, 50);
+  });
+}
+async function send() {
+  const s = [...sessions.values()].find(x => x.dc && x.dc.readyState === "open");
+  if (!s) { error("pair with a device first, then send."); return; }
+  const items = files.concat(texts.map((t, i) => new File([t], "note-" + (i + 1) + ".txt", { type: "text/plain" })));
+  if (!items.length) { error("choose files or paste text first."); return; }
+  error("");
+  for (const f of items) {
+    const transferId = await sha256(f.name + ":" + f.size + ":" + f.lastModified);
+    const saved = s.tx[transferId];
+    let start = saved ? saved.nextIndex : 0;
+    let digests = saved ? saved.digests.slice(0, start) : [];
+    progress = { sent: Math.min(start * CHUNK, f.size), total: f.size }; renderProgress();
+    s.dc.send(JSON.stringify({ kind: "meta", meta: { transferId, name: f.name, size: f.size, chunkSize: CHUNK } }));
+    const requested = await waitResume(s);
+    if (requested !== null) start = Math.min(start, Math.max(0, requested));
+    digests = saved ? saved.digests.slice(0, start) : [];
+    let i = start;
+    while (i * CHUNK < f.size) {
+      if (s.dc.readyState !== "open") throw new Error("channel closed");
+      if (s.dc.bufferedAmount > HIGH) await drain(s.dc);
+      const part = await f.slice(i * CHUNK, (i + 1) * CHUNK).arrayBuffer();
+      digests[i] = await sha256(part);
+      s.dc.send(part);
+      i++;
+      s.tx[transferId] = { nextIndex: i, digests };
+    }
+    s.dc.send(JSON.stringify({ kind: "done", transferId, digest: await sha256(digests.join("")) }));
+    delete s.tx[transferId];
+  }
+  files = []; texts = []; renderList();
+  log("sent " + items.length + (items.length === 1 ? " item" : " items"));
+}
+async function connect() {
+  error("");
+  const value = el("hub").value.trim();
+  let origin;
+  try { origin = new URL(value); } catch { error("that is not an address. include https://"); return; }
+  if (origin.protocol !== "https:" && origin.protocol !== "http:") { error("the hub address must start with https:// or http://"); return; }
+  if (!isLan(origin.hostname)) { error("that address is not on this network. near only connects to a lan hub."); return; }
+  hub = origin.href.replace(/\/$/, "");
+  localStorage.setItem("near-hub", hub);
+  el("state").textContent = "connecting";
+  try {
+    const health = await api("/api/health");
+    if (!health.ok) throw new Error("no health response");
+    const joined = await api("/api/join", { room: "near", id, name });
+    renderPeers(joined.peers);
+    el("state").textContent = "connected";
+    log("connected, listening for offers");
+    if (!running) { running = true; pollLoop(); }
+  } catch (e) {
+    el("state").textContent = "could not connect";
+    error("the hub could not be reached: " + e.message);
+  }
+}
+el("connect").onclick = connect;
+el("hub").onkeydown = e => { if (e.key === "Enter") connect(); };
+el("disconnect").onclick = () => {
+  running = false;
+  for (const s of sessions.values()) s.pc.close();
+  sessions.clear();
+  el("state").textContent = "not connected";
+  el("peers").innerHTML = "";
+  log("idle"); renderRoute();
+};
+el("files").onchange = e => { files.push(...e.target.files); e.target.value = ""; renderList(); };
+el("clear").onclick = () => { files = []; texts = []; progress = { sent: 0, total: 0 }; renderList(); renderProgress(); };
+el("add").onclick = () => { const t = el("text").value.trim(); if (t) { texts.push(t); el("text").value = ""; renderList(); } };
+el("text").onkeydown = e => { if (e.key === "Enter") el("add").onclick(); };
+el("send").onclick = () => send().catch(e => error("transfer stopped: " + e.message));
+el("save").onclick = () => {
+  if (!incoming) return;
+  const url = URL.createObjectURL(incoming.blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = incoming.name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+};
+renderList(); renderProgress(); renderRoute(); renderIncoming();
+connect();
+</script>
+</body>
+</html>

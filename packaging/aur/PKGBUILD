@@ -1,0 +1,35 @@
+# Maintainer: CallMeAlphabet
+pkgname=near
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="near, a LAN-only file transfer hub, builds from source"
+arch=('x86_64' 'aarch64')
+url="https://github.com/CallMeAlphabet/near"
+license=('Apache-2.0')
+depends=('gcc-libs')
+makedepends=('cargo')
+provides=('near')
+conflicts=('near-bin')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/CallMeAlphabet/near/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    rm -rf "$srcdir/build"
+    mkdir -p "$srcdir/build"
+    tar -xzf "$srcdir/$pkgname-$pkgver.tar.gz" --strip-components=1 -C "$srcdir/build"
+    cd "$srcdir/build"
+    cargo fetch --locked
+}
+
+build() {
+    cd "$srcdir/build"
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+package() {
+    cd "$srcdir/build"
+    install -Dm755 "target/release/near" "$pkgdir/usr/bin/near"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
