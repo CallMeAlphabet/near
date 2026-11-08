@@ -10,6 +10,8 @@ pkgbase = near
 	depends = gcc-libs
 	provides = near
 	conflicts = near-bin
+	options = !debug
+	options = !lto
 	source = near-lan-0.1.0.crate::https://static.crates.io/crates/near-lan/near-lan-0.1.0.crate
 	sha256sums = bc8a6a033e6d3d5717d31945ae3bcf9d536aa22989a59fc3700ad2acd0a440f6
 

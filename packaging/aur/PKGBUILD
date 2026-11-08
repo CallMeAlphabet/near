@@ -10,6 +10,11 @@ depends=('gcc-libs')
 makedepends=('cargo')
 provides=('near')
 conflicts=('near-bin')
+# Arch's default makepkg.conf enables lto, which puts -flto=auto in CFLAGS.
+# ring's C objects then become GCC LTO bytecode, and rust-lld (Rust >= 1.90's
+# default linker) cannot resolve them: undefined ring_core_0_17_14__* symbols.
+# This only disables makepkg's C-level LTO; Cargo's own lto = "thin" is untouched.
+options=('!debug' '!lto')
 # The published crate is immutable and served from the crates.io CDN, unlike a
 # GitHub archive. It is a gzipped tarball with a .crate extension.
 source=("near-lan-$pkgver.crate::https://static.crates.io/crates/near-lan/near-lan-$pkgver.crate")
@@ -27,7 +32,9 @@ prepare() {
 build() {
     cd "$srcdir/build"
     export CARGO_TARGET_DIR=target
-    cargo build --frozen --release
+    # cc-rs build scripts honour the distro CFLAGS; strip them so ring's C code
+    # is compiled the same way as a plain cargo build. Rust flags come from Cargo.toml.
+    CFLAGS= CXXFLAGS= CPPFLAGS= LDFLAGS= cargo build --frozen --release
 }
 
 package() {
