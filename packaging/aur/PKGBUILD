@@ -10,13 +10,16 @@ depends=('gcc-libs')
 makedepends=('cargo')
 provides=('near')
 conflicts=('near-bin')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/CallMeAlphabet/near/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+# The published crate is immutable and served from the crates.io CDN, unlike a
+# GitHub archive. It is a gzipped tarball with a .crate extension.
+source=("near-lan-$pkgver.crate::https://static.crates.io/crates/near-lan/near-lan-$pkgver.crate")
+noextract=("near-lan-$pkgver.crate")
+sha256sums=('bc8a6a033e6d3d5717d31945ae3bcf9d536aa22989a59fc3700ad2acd0a440f6')
 
 prepare() {
     rm -rf "$srcdir/build"
     mkdir -p "$srcdir/build"
-    tar -xzf "$srcdir/$pkgname-$pkgver.tar.gz" --strip-components=1 -C "$srcdir/build"
+    tar -xzf "$srcdir/near-lan-$pkgver.crate" --strip-components=1 -C "$srcdir/build"
     cd "$srcdir/build"
     cargo fetch --locked
 }
