@@ -1,15 +1,14 @@
 name: aur-publish
 
+# Follow the crate publish instead of running on every push: the AUR source
+# package points at an immutable crates.io tarball, so the version must exist
+# on crates.io before we bump the PKGBUILD. publish.yml edits Cargo.toml only
+# inside CI, which is why we read the version from the sparse index here.
 on:
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.*'
-      - '.*/**'
-      - 'packaging/**'
+  workflow_run:
+    workflows: ["publish-crate"]
+    types: [completed]
+  workflow_dispatch:
 
 jobs:
   aur-publish:
@@ -17,15 +16,20 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install tools
-        run: pacman -Sy --noconfirm base-devel git openssh curl
+        run: pacman -Sy --noconfirm base-devel git openssh curl pacman-contrib
 
-      # near is semver-versioned and its AUR source package builds the published
-      # crate, so keep pkgver from Cargo.toml instead of the run number. The other
-      # repos use run-number pkgver plus a pinned _commit archive; that would point
-      # the .crate source at a version that does not exist.
       - name: Set up SSH, clone, sync version, and push to AUR
         run: |
           set -e
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "AUR_SSH_PRIVATE_KEY is not set - skipping"
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+            echo "publish-crate did not succeed - skipping"
+            exit 0
+          fi
+
           mkdir -p /tmp/ssh
           echo "$AUR_SSH_PRIVATE_KEY" > /tmp/ssh/aur_key
           chmod 600 /tmp/ssh/aur_key
@@ -38,14 +42,32 @@ jobs:
             exit 0
           fi
 
-          CRATE_VERSION=$(curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/Cargo.toml" | grep '^version' | head -1 | cut -d'"' -f2)
+          CURRENT=$(grep '^pkgver=' PKGBUILD | cut -d= -f2)
+          CRATE_VERSION=""
+          # The index can lag the publish by a few seconds. Wait for a version
+          # that differs from the one the AUR package currently uses.
+          for i in $(seq 1 10); do
+            CRATE_VERSION=$(curl -fsSL https://index.crates.io/ne/ar/near-lan \
+              | tail -n 1 | sed -n 's/.*"vers":"\([^"]*\)".*/\1/p')
+            if [ -n "$CRATE_VERSION" ] && [ "$CRATE_VERSION" != "$CURRENT" ]; then
+              break
+            fi
+            sleep 6
+          done
+          if [ -z "$CRATE_VERSION" ]; then
+            echo "could not read the published crate version from the sparse index"
+            exit 1
+          fi
+          echo "newest published crate: $CRATE_VERSION (AUR had $CURRENT)"
           sed -i "s/^pkgver=.*/pkgver=$CRATE_VERSION/" PKGBUILD
           sed -i "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
 
           useradd -m builduser
           chown -R builduser:builduser /tmp/aur-repo
           git config --global --add safe.directory /tmp/aur-repo
-          su builduser -c "cd /tmp/aur-repo && makepkg --printsrcinfo > .SRCINFO"
+          # updpkgsums refreshes the .crate checksum, which --printsrcinfo alone
+          # cannot do. A stale checksum would break the AUR package.
+          su builduser -c "cd /tmp/aur-repo && updpkgsums && makepkg --printsrcinfo > .SRCINFO"
 
           git config user.name "CallMeAlphabet"
           git config user.email "sigma.alphabet@proton.me"
